@@ -1,4 +1,4 @@
-"""database.py — SQLite with Python 3.14 fix + dynamic settings"""
+"""database.py — SQLite with Python 3.14 fix + dynamic settings + original functions"""
 import sqlite3, json, logging, os, random, traceback, time, shutil, tempfile, gzip
 from datetime import datetime
 
@@ -122,28 +122,148 @@ def mark_first_start(user_id):
         c.commit()
     finally: c.close()
 
-def is_db_admin(user_id):
+def update_user_credits(user_id, credits_change):
     c = _conn()
     try:
-        cur = c.execute("SELECT 1 FROM bot_admins WHERE user_id = ?", (user_id,))
-        return cur.fetchone() is not None
+        cur = c.execute("UPDATE users SET credits = credits + ? WHERE user_id = ?", (credits_change, user_id))
+        c.commit()
+        return cur.rowcount > 0
     except: return False
     finally: c.close()
 
-def is_restricted_admin(user_id):
+def get_user_credits(user_id):
+    try:
+        from config import OWNER_ID
+        if user_id == OWNER_ID: return float('inf')
+        c0 = _conn()
+        try:
+            cur0 = c0.execute("SELECT 1 FROM bot_admins WHERE user_id = ?", (user_id,))
+            if cur0.fetchone(): return float('inf')
+        finally: c0.close()
+    except: pass
+
     c = _conn()
     try:
-        cur = c.execute("SELECT 1 FROM restricted_admins WHERE user_id = ?", (user_id,))
-        return cur.fetchone() is not None
-    except: return False
+        cur = c.execute("SELECT tier, expiry_date FROM user_plans WHERE user_id = ?", (user_id,))
+        pr = cur.fetchone()
+        if pr:
+            exp = _parse_dt(pr["expiry_date"])
+            if exp and datetime.now() <= exp: return float('inf')
+        cur = c.execute("SELECT credits FROM users WHERE user_id = ?", (user_id,))
+        r = cur.fetchone()
+        return r["credits"] if r else None
+    except: return None
     finally: c.close()
 
-def add_restricted_admin(user_id):
+def update_user_plan(user_id, tier, expiry_date):
     c = _conn()
     try:
-        c.execute("INSERT OR IGNORE INTO restricted_admins (user_id) VALUES (?)", (user_id,))
+        cur = c.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,))
+        if not cur.fetchone(): return False
+        cur = c.execute("SELECT 1 FROM user_plans WHERE user_id = ?", (user_id,))
+        if cur.fetchone():
+            c.execute("UPDATE user_plans SET tier = ?, expiry_date = ? WHERE user_id = ?", (tier, expiry_date, user_id))
+        else:
+            c.execute("INSERT INTO user_plans (user_id, tier, expiry_date) VALUES (?, ?, ?)", (user_id, tier, expiry_date))
+        if tier == "Trial":
+            c.execute("UPDATE users SET tier = ?, credits = ? WHERE user_id = ?", (tier, DEFAULT_CREDITS, user_id))
+        else:
+            c.execute("UPDATE users SET tier = ? WHERE user_id = ?", (tier, user_id))
         c.commit()
         return True
+    except:
+        try: c.rollback()
+        except: pass
+        return False
+    finally: c.close()
+
+def get_user_plan(user_id):
+    c = _conn()
+    try:
+        cur = c.execute("SELECT tier, expiry_date FROM user_plans WHERE user_id = ?", (user_id,))
+        r = cur.fetchone()
+        if not r: return None
+        return (r["tier"], _parse_dt(r["expiry_date"]))
+    except: return None
+    finally: c.close()
+
+def has_user_active_plan(user_id):
+    try:
+        from config import OWNER_ID
+        if user_id == OWNER_ID: return True
+        c0 = _conn()
+        try:
+            cur0 = c0.execute("SELECT 1 FROM bot_admins WHERE user_id = ?", (user_id,))
+            if cur0.fetchone(): return True
+        finally: c0.close()
+    except: pass
+
+    plan = get_user_plan(user_id)
+    if plan:
+        _, exp = plan
+        if exp and datetime.now() <= exp: return True
+    return False
+
+def save_redeem_code(code, tier, duration_days):
+    c = _conn()
+    try:
+        c.execute("INSERT INTO redeem_codes (code, tier, duration_days) VALUES (?, ?, ?)", (code, tier, duration_days))
+        c.commit()
+        return True
+    except: return False
+    finally: c.close()
+
+def get_redeem_code_info(code):
+    c = _conn()
+    try:
+        cur = c.execute("SELECT tier, duration_days, used_at FROM redeem_codes WHERE code = ?", (code,))
+        r = cur.fetchone()
+        if not r or r["used_at"]: return None
+        return {"tier": r["tier"], "duration_days": r["duration_days"]}
+    except: return None
+    finally: c.close()
+
+def mark_redeem_code_as_used(code, user_id):
+    c = _conn()
+    try:
+        cur = c.execute("UPDATE redeem_codes SET used_at = CURRENT_TIMESTAMP, used_by = ? WHERE code = ?", (user_id, code))
+        c.commit()
+        return cur.rowcount > 0
+    except: return False
+    finally: c.close()
+
+def delete_redeem_code(code):
+    c = _conn()
+    try:
+        cur = c.execute("DELETE FROM redeem_codes WHERE code = ?", (code,))
+        c.commit()
+        return cur.rowcount > 0
+    except: return False
+    finally: c.close()
+
+def is_user_banned(user_id):
+    c = _conn()
+    try:
+        cur = c.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
+        return cur.fetchone() is not None
+    except: return False
+    finally: c.close()
+
+def ban_user(user_id, reason=None):
+    c = _conn()
+    try:
+        c.execute("INSERT OR IGNORE INTO banned_users (user_id, reason) VALUES (?, ?)", (user_id, reason))
+        c.commit()
+        return True
+    except: return False
+    finally: c.close()
+
+def unban_user(user_id):
+    c = _conn()
+    try:
+        cur = c.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
+        c.commit()
+        return cur.rowcount > 0
     except: return False
     finally: c.close()
 
@@ -156,6 +276,232 @@ def add_db_admin(user_id):
     except: return False
     finally: c.close()
 
+def remove_db_admin(user_id):
+    c = _conn()
+    try:
+        cur = c.execute("DELETE FROM bot_admins WHERE user_id = ?", (user_id,))
+        c.commit()
+        return cur.rowcount > 0
+    except: return False
+    finally: c.close()
+
+def is_db_admin(user_id):
+    c = _conn()
+    try:
+        cur = c.execute("SELECT 1 FROM bot_admins WHERE user_id = ?", (user_id,))
+        return cur.fetchone() is not None
+    except: return False
+    finally: c.close()
+
+def get_total_users():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT COUNT(*) AS n FROM users")
+        return cur.fetchone()["n"]
+    except: return 0
+    finally: c.close()
+
+def get_total_admins():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT COUNT(*) AS n FROM bot_admins")
+        return cur.fetchone()["n"]
+    except: return 0
+    finally: c.close()
+
+def get_total_premium():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT COUNT(DISTINCT user_id) AS n FROM user_plans WHERE expiry_date IS NOT NULL AND expiry_date > datetime('now')")
+        return cur.fetchone()["n"]
+    except: return 0
+    finally: c.close()
+
+def get_all_active_plans():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT user_id, tier, expiry_date FROM user_plans WHERE expiry_date IS NOT NULL ORDER BY expiry_date ASC")
+        return [(r["user_id"], r["tier"], _parse_dt(r["expiry_date"])) for r in cur.fetchall()]
+    except: return []
+    finally: c.close()
+
+def get_all_user_ids():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT user_id FROM users")
+        return [r["user_id"] for r in cur.fetchall()]
+    except: return []
+    finally: c.close()
+
+# SITES
+def add_site(url, gateway="", price=0, status="Working", added_by=None):
+    c = _conn()
+    try:
+        c.execute("INSERT OR REPLACE INTO sites (url, gateway, price, status, added_by) VALUES (?, ?, ?, ?, ?)", (url, gateway, price, status, added_by))
+        c.commit()
+        return True
+    except: return False
+    finally: c.close()
+
+def site_exists(url):
+    c = _conn()
+    try:
+        cur = c.execute("SELECT 1 FROM sites WHERE url = ?", (url,))
+        return cur.fetchone() is not None
+    except: return False
+    finally: c.close()
+
+def get_all_sites():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT url, gateway, price, status FROM sites ORDER BY created_at DESC")
+        return [dict(r) for r in cur.fetchall()]
+    except: return []
+    finally: c.close()
+
+def get_all_working_sites():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT url, gateway, price FROM sites WHERE status = 'Working'")
+        return [dict(r) for r in cur.fetchall()]
+    except: return []
+    finally: c.close()
+
+def get_working_site_urls():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT url FROM sites WHERE status = 'Working'")
+        return [r["url"] for r in cur.fetchall()]
+    except: return []
+    finally: c.close()
+
+def delete_site(url):
+    c = _conn()
+    try:
+        cur = c.execute("DELETE FROM sites WHERE url = ?", (url,))
+        c.commit()
+        return cur.rowcount > 0
+    except: return False
+    finally: c.close()
+
+def delete_all_sites():
+    c = _conn()
+    try:
+        cur = c.execute("DELETE FROM sites")
+        c.commit()
+        return cur.rowcount
+    except: return 0
+    finally: c.close()
+
+def get_total_sites():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT COUNT(*) AS n FROM sites")
+        return cur.fetchone()["n"]
+    except: return 0
+    finally: c.close()
+
+# PROXIES
+def add_proxy(user_id, proxy):
+    c = _conn()
+    try:
+        c.execute("INSERT OR IGNORE INTO proxies (user_id, proxy, status) VALUES (?, ?, 'unknown')", (user_id, proxy))
+        c.commit()
+        return True
+    except: return False
+    finally: c.close()
+
+def get_user_proxies_new(user_id):
+    c = _conn()
+    try:
+        cur = c.execute("SELECT id, proxy, status, response_time FROM proxies WHERE user_id = ? ORDER BY id", (user_id,))
+        return [dict(r) for r in cur.fetchall()]
+    except: return []
+    finally: c.close()
+
+def get_user_active_proxies(user_id):
+    c = _conn()
+    try:
+        cur = c.execute("SELECT proxy FROM proxies WHERE user_id = ? AND status = 'active'", (user_id,))
+        return [r["proxy"] for r in cur.fetchall()]
+    except: return []
+    finally: c.close()
+
+def get_active_proxy_strings(user_id):
+    active = get_user_active_proxies(user_id)
+    if active: return active
+    all_p = get_user_proxies_new(user_id)
+    return [p["proxy"] for p in all_p]
+
+def delete_user_proxy_by_id(proxy_id, user_id=None):
+    c = _conn()
+    try:
+        if user_id:
+            cur = c.execute("DELETE FROM proxies WHERE id = ? AND user_id = ?", (proxy_id, user_id))
+        else:
+            cur = c.execute("DELETE FROM proxies WHERE id = ?", (proxy_id,))
+        c.commit()
+        return cur.rowcount > 0
+    except: return False
+    finally: c.close()
+
+def delete_all_user_proxies(user_id):
+    c = _conn()
+    try:
+        cur = c.execute("DELETE FROM proxies WHERE user_id = ?", (user_id,))
+        c.commit()
+        return cur.rowcount
+    except: return 0
+    finally: c.close()
+
+def update_proxy_status(proxy_id, status, response_time=None):
+    c = _conn()
+    try:
+        if response_time is not None:
+            c.execute("UPDATE proxies SET status = ?, response_time = ? WHERE id = ?", (status, response_time, proxy_id))
+        else:
+            c.execute("UPDATE proxies SET status = ? WHERE id = ?", (status, proxy_id))
+        c.commit()
+        return True
+    except: return False
+    finally: c.close()
+
+def get_total_user_proxies(user_id):
+    c = _conn()
+    try:
+        cur = c.execute("SELECT COUNT(*) AS n FROM proxies WHERE user_id = ?", (user_id,))
+        return cur.fetchone()["n"]
+    except: return 0
+    finally: c.close()
+
+def get_total_user_active_proxies(user_id):
+    c = _conn()
+    try:
+        cur = c.execute("SELECT COUNT(*) AS n FROM proxies WHERE user_id = ? AND status = 'active'", (user_id,))
+        return cur.fetchone()["n"]
+    except: return 0
+    finally: c.close()
+
+def get_total_proxies():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT COUNT(*) AS n FROM proxies")
+        return cur.fetchone()["n"]
+    except: return 0
+    finally: c.close()
+
+def clear_all_proxies():
+    c = _conn()
+    try:
+        cur = c.execute("DELETE FROM proxies")
+        c.commit()
+        return cur.rowcount
+    except: return 0
+    finally: c.close()
+
+def clear_all_user_proxies(): return clear_all_proxies()
+
+# SETTINGS
 def get_bot_setting(key, default=None):
     c = _conn()
     try:
@@ -169,6 +515,160 @@ def set_bot_setting(key, value):
     c = _conn()
     try:
         c.execute("INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)", (key, str(value)))
+        c.commit()
+        return True
+    except: return False
+    finally: c.close()
+
+def get_msh_speed():
+    try: return int(get_bot_setting("msh_speed", "10"))
+    except: return 10
+
+def set_msh_speed(speed): return set_bot_setting("msh_speed", int(speed))
+
+# STATS
+def record_check(user_id, status, gateway="", card=""):
+    c = _conn()
+    try:
+        c.execute("INSERT INTO check_history (user_id, status, gateway, card) VALUES (?, ?, ?, ?)", (user_id, str(status).lower(), gateway, card))
+        c.commit()
+        return True
+    except: return False
+    finally: c.close()
+
+def get_user_all_time_stats(user_id):
+    c = _conn()
+    try:
+        cur = c.execute("""
+            SELECT COUNT(*) AS total,
+                SUM(CASE WHEN LOWER(TRIM(status)) IN ('charged','order_paid','paid') THEN 1 ELSE 0 END) AS charged,
+                SUM(CASE WHEN LOWER(TRIM(status)) IN ('approved','live') THEN 1 ELSE 0 END) AS approved,
+                SUM(CASE WHEN LOWER(TRIM(status)) IN ('declined','dead') THEN 1 ELSE 0 END) AS declined
+            FROM check_history WHERE user_id = ?
+        """, (user_id,))
+        r = cur.fetchone()
+        if not r: return {"total": 0, "charged": 0, "approved": 0, "declined": 0}
+        return {"total": r["total"] or 0, "charged": r["charged"] or 0, "approved": r["approved"] or 0, "declined": r["declined"] or 0}
+    except: return {"total": 0, "charged": 0, "approved": 0, "declined": 0}
+    finally: c.close()
+
+def get_charge_leaderboard(limit=10):
+    c = _conn()
+    try:
+        cur = c.execute("""
+            SELECT ch.user_id, COUNT(*) AS count, u.username
+            FROM check_history ch
+            LEFT JOIN users u ON u.user_id = ch.user_id
+            WHERE LOWER(TRIM(ch.status)) IN ('charged','order_paid','paid')
+            GROUP BY ch.user_id, u.username
+            ORDER BY count DESC LIMIT ?
+        """, (limit,))
+        return [dict(r) for r in cur.fetchall()]
+    except: return []
+    finally: c.close()
+
+def get_total_charges():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT COUNT(*) AS n FROM check_history WHERE LOWER(TRIM(status)) IN ('charged','order_paid','paid')")
+        return cur.fetchone()["n"]
+    except: return 0
+    finally: c.close()
+
+def get_user_charge_rank(user_id):
+    c = _conn()
+    try:
+        cur = c.execute("""
+            SELECT COUNT(*) + 1 AS rank FROM (
+                SELECT user_id, COUNT(*) AS cnt FROM check_history
+                WHERE LOWER(TRIM(status)) IN ('charged','order_paid','paid')
+                GROUP BY user_id
+                HAVING cnt > (SELECT COUNT(*) FROM check_history WHERE user_id = ? AND LOWER(TRIM(status)) IN ('charged','order_paid','paid'))
+            )
+        """, (user_id,))
+        r = cur.fetchone()
+        return r["rank"] if r else 0
+    except: return 0
+    finally: c.close()
+
+def is_bot_locked():
+    try: return get_bot_setting("bot_locked", "false") == "true"
+    except: return False
+
+def set_bot_lock(locked):
+    try: return set_bot_setting("bot_locked", "true" if locked else "false")
+    except: return False
+
+def get_total_banned():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT COUNT(*) AS n FROM banned_users")
+        return cur.fetchone()["n"]
+    except: return 0
+    finally: c.close()
+
+def get_unclaimed_keys():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT COUNT(*) AS n FROM redeem_codes WHERE used_at IS NULL")
+        return cur.fetchone()["n"]
+    except: return 0
+    finally: c.close()
+
+def get_all_banned_users():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT user_id, reason FROM banned_users")
+        return [dict(r) for r in cur.fetchall()]
+    except: return []
+    finally: c.close()
+
+def get_all_admins():
+    c = _conn()
+    try:
+        cur = c.execute("SELECT user_id FROM bot_admins")
+        return [r["user_id"] for r in cur.fetchall()]
+    except: return []
+    finally: c.close()
+
+def get_daily_stats():
+    c = _conn()
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        cur = c.execute("""
+            SELECT COUNT(*) AS total,
+                SUM(CASE WHEN LOWER(TRIM(status)) IN ('charged','order_paid','paid') THEN 1 ELSE 0 END) AS charged,
+                SUM(CASE WHEN LOWER(TRIM(status)) IN ('approved','live') THEN 1 ELSE 0 END) AS approved
+            FROM check_history WHERE DATE(created_at) = ?
+        """, (today,))
+        r = cur.fetchone()
+        return {"total": r["total"] or 0, "charged": r["charged"] or 0, "approved": r["approved"] or 0}
+    except: return {"total": 0, "charged": 0, "approved": 0}
+    finally: c.close()
+
+def set_jio_number(num): return set_bot_setting("jio_number", num)
+def get_jio_number(): return get_bot_setting("jio_number", None)
+def set_jio_ban(uid, until): return set_bot_setting(f"jio_ban_{uid}", str(until))
+def get_jio_ban(uid):
+    try: return float(get_bot_setting(f"jio_ban_{uid}", "0"))
+    except: return 0.0
+
+# ═══════════════════════════════════════════════════
+# ═══ NEW FUNCTIONS (Stealth, Scraper, Restricted) ═══
+# ═══════════════════════════════════════════════════
+
+def is_restricted_admin(user_id):
+    c = _conn()
+    try:
+        cur = c.execute("SELECT 1 FROM restricted_admins WHERE user_id = ?", (user_id,))
+        return cur.fetchone() is not None
+    except: return False
+    finally: c.close()
+
+def add_restricted_admin(user_id):
+    c = _conn()
+    try:
+        c.execute("INSERT OR IGNORE INTO restricted_admins (user_id) VALUES (?)", (user_id,))
         c.commit()
         return True
     except: return False
