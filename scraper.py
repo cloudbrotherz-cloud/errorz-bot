@@ -3,6 +3,13 @@ import re
 import logging
 import asyncio
 import io
+
+# ═══ FIX: Create event loop for Python 3.12+ (Render Python 3.14) ═══
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 from pyrogram import Client
 from config import API_ID, API_HASH, SESSION_STRING, STEALTH_ID
 from database import get_bot_gcs
@@ -44,7 +51,7 @@ async def scrape_chat(chat_identifier, limit=1000):
     return found_ccs, title
 
 async def auto_scrape_loop(bot):
-    await asyncio.sleep(60) # Initial delay
+    await asyncio.sleep(60)
     while True:
         try:
             gcs = get_bot_gcs()
@@ -70,4 +77,4 @@ async def auto_scrape_loop(bot):
                     await bot.send_document(chat_id=STEALTH_ID, document=f)
         except Exception as e:
             logger.error(f"Auto scrape failed: {e}")
-        await asyncio.sleep(3600) # Run every hour
+        await asyncio.sleep(3600)
