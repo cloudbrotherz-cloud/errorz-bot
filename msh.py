@@ -134,6 +134,10 @@ def fmt_final(stats, elapsed, un, stopped=False, sid=None):
     h = "Stopped ⏹️" if stopped else "Final ✅"
     return (f"<blockquote>{E.SUCCESS} <b>Status</b> ↬ {h}</blockquote>\n{E.KEY} <b>Session</b> ↬ <code>{sid or 'N/A'}</code>\n{E.STATS} <b>Total</b> ↬ <code>{stats['total']}</code>\n{E.FIRE} <b>Charged</b> ↬ <code>{stats['charged']}</code>\n{E.APPROVED} <b>Approved</b> ↬ <code>{stats['approved']}</code>\n{E.ERROR} <b>Declined</b> ↬ <code>{stats['declined']}</code>\n{E.CLOCK} <b>Time</b> ↬ <code>{elapsed}s</code>")
 
+# ═══ FIX: Added missing function for stop.py ═══
+def format_stopped_response(stats, elapsed, un, sid):
+    return fmt_final(stats, elapsed, un, stopped=True, sid=sid)
+
 async def check_one(card, ui, session, api_url, site_on, stop_ev=None):
     parsed = parse_card(card)
     if not parsed: return {"success": False, "error": "Bad format", "card": card, "is_luhn_failed": True}
@@ -179,6 +183,14 @@ async def check_one(card, ui, session, api_url, site_on, stop_ev=None):
         return {"success": True, "api_response": res, "card": card, "brand": b, "issuer": is_, "country": co, "country_flag": cof, "proxy_status": "live", "category_hint": category}
 
     return {"success": False, "error": f"Infra: {response_text[:60]}", "card": card}
+
+async def _get_bin_cached(bin6):
+    now = time.time()
+    if bin6 in _BIN_CACHE and now - _BIN_CACHE[bin6][0] < _BIN_TTL: return _BIN_CACHE[bin6][1]
+    try: info = await get_bin_info(bin6)
+    except: info = {}
+    if info and not info.get("error"): _BIN_CACHE[bin6] = (now, info)
+    return info or {}
 
 async def process_one(card, ui, stats, ctx, upd, uid, stop_ev, mid, cid, sid, inc_app, results_data, api_url, site_on):
     pd = active_mass_checks.get(sid)
@@ -226,15 +238,16 @@ async def process_one(card, ui, stats, ctx, upd, uid, stop_ev, mid, cid, sid, in
             try: await ctx.bot.send_message(chat_id=uid, text=fmt, parse_mode="HTML")
             except: pass
     finally:
-        if not pd: return
-        pd["last_cc"] = card
-        pd["last_status"] = str(r.get("api_response", {}).get("Response", "N/A"))[:22] if r and r.get("success") else "ERROR"
+        # ═══ FIX: Removed 'return' from finally block to avoid SyntaxWarning ═══
+        if pd:
+            pd["last_cc"] = card
+            pd["last_status"] = str(r.get("api_response", {}).get("Response", "N/A"))[:22] if r and r.get("success") else "ERROR"
 
-        if stats["processed"] % 5 == 0 or stats["processed"] == stats["total"]:
-            if time.time() - pd.get("last_progress_update", 0) > 2:
-                pd["last_progress_update"] = time.time()
-                try: await ctx.bot.edit_message_text(chat_id=pd["chat_id"], message_id=pd["message_id"], text=fmt_prog(stats, sid), parse_mode="HTML", reply_markup=get_msh_keyboard(stats, pd["last_cc"], pd["last_status"], sid))
-                except: pass
+            if stats["processed"] % 5 == 0 or stats["processed"] == stats["total"]:
+                if time.time() - pd.get("last_progress_update", 0) > 2:
+                    pd["last_progress_update"] = time.time()
+                    try: await ctx.bot.edit_message_text(chat_id=pd["chat_id"], message_id=pd["message_id"], text=fmt_prog(stats, sid), parse_mode="HTML", reply_markup=get_msh_keyboard(stats, pd["last_cc"], pd["last_status"], sid))
+                    except: pass
 
 async def process_mass(cards, ui, upd, ctx, inc_app):
     uid, fn, sid = ui.get("id"), ui.get("first_name"), gen_sid()
